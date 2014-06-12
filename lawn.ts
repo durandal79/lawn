@@ -2,9 +2,24 @@
 ///<reference path="defs/express.d.ts"/>
 /// <reference path="lib/references.ts"/>
 
-var when = require('when')
+import when = require('when')
+import MetaHub = require('vineyard-metahub')
+import Ground = require('vineyard-ground')
+import Vineyard = require('vineyard')
 
 declare var Irrigation
+
+interface User_Source {
+  name:string
+  username:string
+  password:string
+  email?:string
+  phone?:string
+  gender?:string
+  facebook_token?:string
+  image?:string
+  address?
+}
 
 class Lawn extends Vineyard.Bulb {
   io // Socket IO
@@ -50,31 +65,33 @@ class Lawn extends Vineyard.Bulb {
 //      return this.ground.db.query("INSERT INTO debug (source, message, time) VALUES ('server', '" + text + "', " + time + ")");
   }
 
-  emit_to_users(users, name, data) {
-    this.vineyard.bulbs.songbird.notify(users, name, data)
+  emit_to_users(users, name, data):Promise {
+    return this.vineyard.bulbs.songbird.notify(users, name, data)
   }
 
-  notify(users, name, data) {
-    this.vineyard.bulbs.songbird.notify(users, name, data)
+  notify(users, name, data, trellis_name:string):Promise {
+    return this.vineyard.bulbs.songbird.notify(users, name, data, trellis_name)
   }
 
-  get_user_socket(id:number):Socket {
-    return this.instance_user_sockets[id]
+  get_user_sockets(id:number):Socket[] {
+    return MetaHub.map_to_array(this.instance_user_sockets[id], (x)=> x)
+      || []
   }
 
   initialize_session(socket, user) {
     this.instance_sockets[socket.id] = socket
-    this.instance_user_sockets[user.id] = socket
+    this.instance_user_sockets[user.id] = this.instance_user_sockets[user.id] || []
+    this.instance_user_sockets[user.id][socket.id] = socket
     this.ground.db.query('UPDATE users SET online = 1 WHERE id = ' + user.id)
 
     socket.join('user/' + user.id)
 
     socket.on('query', (request, callback)=>
-        Irrigation.process('query', request, user, this.vineyard, socket, callback)
+        Lawn.Irrigation.process('query', request, user, this.vineyard, socket, callback)
     )
 
     socket.on('update', (request, callback)=>
-        Irrigation.process('update', request, user, this.vineyard, socket, callback)
+        Lawn.Irrigation.process('update', request, user, this.vineyard, socket, callback)
     )
 
     this.on_socket(socket, 'room/join', user, (request)=> {
@@ -103,19 +120,21 @@ class Lawn extends Vineyard.Bulb {
 
   // Attach user online status to any queried users
   query_user(user, query:Ground.Query_Builder) {
-    console.log('modifying query')
+//    console.log('modifying query')
     if (!this.io)
       return
 
     var clients = this.io.sockets.clients(user.id)
-    console.log('modifying query', clients.length)
+//    console.log('modifying query', clients.length)
 //    user.online = clients.length > 0
   }
 
   start() {
-    this.ground.db.query("UPDATE users SET online = 0 WHERE online = 1")
-    this.start_http(this.config.ports.http);
-    this.start_sockets(this.config.ports.websocket);
+    return this.ground.db.query("UPDATE users SET online = 0 WHERE online = 1")
+      .then(()=> {
+        this.start_http(this.config.ports.http);
+        this.start_sockets(this.config.ports.websocket);
+      })
   }
 
   static public_user_properties = [ 'id', 'name', 'username', 'email' ]
@@ -142,15 +161,25 @@ class Lawn extends Vineyard.Bulb {
   get_public_user(user):Promise {
     if (typeof user == 'object') {
       if (Lawn.is_ready_user_object(user)) {
-        return Lawn.format_public_user(user)
+        return when.resolve(Lawn.format_public_user(user))
       }
     }
 
     var id = typeof user == 'object' ? user.id : user
     var query = this.ground.create_query('user')
     query.add_key_filter(id)
-    return query.run()
+    return query.run_single()
       .then((user)=> Lawn.format_public_user(user))
+  }
+
+
+  get_schema(req, res, user) {
+    var fortress = this.vineyard.bulbs.fortress
+    var response = fortress.user_has_role(user, 'admin')
+      ? this.ground.export_schema()
+      : {}
+
+    res.send(response)
   }
 
   get_user_from_session(token:string):Promise {
@@ -162,13 +191,13 @@ class Lawn extends Vineyard.Bulb {
       .then((session) => {
         console.log('session', session)
         if (!session)
-          throw new Lawn.HttpError('Session not found.', 400)
+          throw new Lawn.HttpError('Session not found.', 401)
 
         if (session.token === 0)
-          throw new Lawn.HttpError('Invalid session.', 400)
+          throw new Lawn.HttpError('Invalid session.', 401)
 
         if (typeof session.user !== 'object')
-          throw new Lawn.HttpError('User not found.', 400)
+          throw new Lawn.HttpError('User not found.', 401)
 
         var user = session.user
 
@@ -182,7 +211,6 @@ class Lawn extends Vineyard.Bulb {
       return this.vineyard.bulbs.facebook.login(req, res, body)
 
     console.log('login', body)
-    var mysql = require('mysql')
     return this.ground.db.query("SELECT id, name FROM users WHERE username = ? AND password = ?", [body.name, body.pass])
       .then((rows)=> {
         if (rows.length == 0) {
@@ -190,8 +218,11 @@ class Lawn extends Vineyard.Bulb {
         }
 
         var user = rows[0];
-        return Lawn.create_session(user, req, this.ground)
-          .then(()=> this.send_http_login_success(req, res, user))
+        this.invoke('user.login', user)
+          .then(()=> {
+            return Lawn.create_session(user, req, this.ground)
+              .then(()=> this.send_http_login_success(req, res, user))
+          })
       })
   }
 
@@ -222,6 +253,148 @@ class Lawn extends Vineyard.Bulb {
           message: 'Login successful2',
           user: Lawn.format_internal_user(row)
         })
+      })
+  }
+
+
+  register(req, res):Promise {
+    var body = <User_Source>req.body,
+      name = body.name,
+      username = body.username,
+      email = body.email,
+      phone = body.phone,
+      facebook_token = body.facebook_token
+
+    var invalid_characters = /[^A-Za-z\- _0-9]/
+
+    if (!name)
+      return when.reject(new Lawn.HttpError('Request missing name.', 400))
+
+    if (typeof name != 'string' || name.length > 32 || name.match(invalid_characters))
+      return when.reject(new Lawn.HttpError('Invalid name.', 400))
+
+    if (typeof username != 'string' || username.length > 32 || name.match(invalid_characters))
+      return when.reject(new Lawn.HttpError('Invalid username.', 400))
+
+    if (email && (!email.match(/\S+@\S+\.\S/) || email.match(/['"]/)))
+      return when.reject(new Lawn.HttpError('Invalid email address.', 400))
+
+    var register = (facebook_id = undefined)=> {
+      var args = [ body.name ]
+      var sql = "SELECT 'username' as value FROM users WHERE username = ?"
+      if (body.email) {
+        sql += "\nUNION SELECT 'email' as value FROM users WHERE email = ?"
+        args.push(body.email)
+      }
+
+      if (facebook_id) {
+        sql += "\nUNION SELECT 'facebook_id' as value FROM users WHERE facebook_id = ?"
+        args.push(facebook_id)
+      }
+
+      return this.ground.db.query(sql, args)
+        .then((rows)=> {
+          if (rows.length > 0)
+            return when.reject(new Lawn.HttpError('That ' + rows[0].value + ' is already taken.', 400))
+
+          // Not so worried about invalid gender, just filter it
+          var gender = body.gender
+          if (gender !== 'male' && gender !== 'female')
+            gender = null
+
+          var user = {
+            name: name,
+            username: username,
+            email: email,
+            password: body.password,
+            gender: gender,
+            phone: phone,
+            roles: [ 2 ],
+            address: body.address,
+            image: body.image
+          }
+          console.log('user', user, facebook_id)
+          this.ground.create_update('user', user).run()
+            .then((user)=> {
+              var finished = ()=> {
+                user.facebook_id = facebook_id
+                res.send({
+                  message: 'User ' + name + ' created successfully.',
+                  user: user
+                })
+              }
+              if (facebook_id)
+                return this.ground.db.query_single("UPDATE users SET facebook_id = ? WHERE id = ?", [facebook_id, user.id])
+                  .then(finished)
+
+              finished()
+            })
+        })
+    }
+
+    if (facebook_token !== undefined) {
+      return this.vineyard.bulbs.facebook.get_user_facebook_id(body)
+        .then((facebook_id)=> register(facebook_id))
+    }
+    else {
+      return register()
+    }
+  }
+
+  link_facebook_user(req, res, user):Promise {
+    var body = req.body
+    if (body.facebook_token === null || body.facebook_token === '') {
+//      if (!user.facebook_id) {
+//        res.send({
+//          message: "Your account is already not linked to a facebook account.",
+//          user: user
+//        });
+//        return when.resolve()
+//      }
+
+      console.log('connect-fb-user-detach', user)
+      delete user.facebook_id
+      return this.ground.db.query_single("UPDATE users SET facebook_id = NULL WHERE id = ?", [user.id])
+        .then(()=> {
+          res.send({
+            message: 'Your user accont and facebook account are now detached.',
+            user: user
+          });
+        })
+    }
+    return this.vineyard.bulbs.facebook.get_user_facebook_id(body)
+      .then((facebook_id)=> {
+        var args = [ body.name ]
+        var sql = "SELECT 'username' as value, FROM users WHERE username = ?"
+        if (body.email) {
+          sql += "UNION SELECT 'email' as value FROM users WHERE email = ?"
+          args.push(body.email)
+        }
+
+        if (facebook_id) {
+          sql += "UNION SELECT 'facebook_id' as value FROM users WHERE facebook_id = ?"
+          args.push(facebook_id)
+        }
+
+//        return this.ground.db.query_single("SELECT id, name FROM users WHERE facebook_id = ?", [facebook_id])
+//          .then((row)=> {
+//            if (row)
+//              return when.reject(new Lawn.HttpError('That facebook id is already attached to a user.', 400))
+
+        console.log('connect-fb-user', {
+          id: user.id,
+          facebook_id: facebook_id,
+        })
+        return this.ground.db.query_single("UPDATE users SET facebook_id = NULL WHERE facebook_id = ?", [facebook_id])
+          .then(()=> this.ground.db.query_single("UPDATE users SET facebook_id = ? WHERE id = ?", [facebook_id, user.id]))
+          .then(()=> {
+            user.facebook_id = facebook_id
+            res.send({
+              message: 'Your user accont is now attached to your facebook account.',
+              user: user
+            });
+          })
+//          })
       })
   }
 
@@ -307,14 +480,20 @@ class Lawn extends Vineyard.Bulb {
       var data, user;
       this.debug('***detected disconnect');
       user = socket.user;
+      if (user)
+        delete this.instance_user_sockets[user.id][socket.id]
+
       delete this.instance_sockets[socket.id];
-      if (user && !this.get_user_socket(user.id)) {
+      if (user && this.get_user_sockets(user.id).length == 0) {
         this.debug(user.id);
         data = user
-        this.ground.db.query('UPDATE users SET online = 0 WHERE id = ' + user.id)
+        if (this.ground.db.active)
+          return this.ground.db.query('UPDATE users SET online = 0 WHERE id = ' + user.id)
 //        data.online = false;
 //        return Server.notify.send_online_changed(user, false);
       }
+
+      return when.resolve()
     });
   }
 
@@ -331,6 +510,8 @@ class Lawn extends Vineyard.Bulb {
 
   on_socket(socket, event, user, action) {
     socket.on(event, (request, callback)=> {
+      callback = callback || function () {
+      }
       try {
         var promise = action(request)
         if (promise && typeof promise.done == 'function') {
@@ -410,7 +591,7 @@ class Lawn extends Vineyard.Bulb {
 
   listen_user_http(path, action, method = 'post') {
     this.app[method](path, (req, res)=> {
-        console.log('server recieved query request.')
+//        console.log('server recieved query request.')
         this.process_user_http(req, res, action)
       }
     )
@@ -422,6 +603,7 @@ class Lawn extends Vineyard.Bulb {
     console.log('Starting Socket.IO on port ' + port)
 
     var io = this.io = socket_io.listen(port)
+    io.set('log level', 1);
     io.server.on('error', (e)=> {
       if (e.code == 'EADDRINUSE') {
         console.log('Port in use: ' + port + '.')
@@ -495,10 +677,25 @@ class Lawn extends Vineyard.Bulb {
 
     app.use(express.bodyParser({ keepExtensions: true, uploadDir: "tmp"}));
     app.use(express.cookieParser());
-    if (!this.config.cookie_secret)
-      throw new Error('lawn.cookie_secret must be set!')
 
-    app.use(express.session({secret: this.config.cookie_secret}))
+    if (typeof this.config.mysql_session_store == 'object') {
+      var MySQL_Session_Store = require('express-mysql-session')
+      var storage_config = <Lawn.Session_Store_Config>this.config.mysql_session_store
+
+      console.log('using mysql sessions store: ', storage_config.db)
+
+      app.use(express.session({
+        key: storage_config.key,
+        secret: storage_config.secret,
+        store: new MySQL_Session_Store(storage_config.db)
+      }))
+    }
+    else {
+      if (!this.config.cookie_secret)
+        throw new Error('lawn.cookie_secret must be set!')
+
+      app.use(express.session({secret: this.config.cookie_secret}))
+    }
 
     // Log request info to a file
     if (typeof this.config.log_file === 'string') {
@@ -509,14 +706,36 @@ class Lawn extends Vineyard.Bulb {
 
     this.listen_public_http('/vineyard/login', (req, res)=> this.http_login(req, res, req.body))
     this.listen_public_http('/vineyard/login', (req, res)=> this.http_login(req, res, req.query), 'get')
-//    app.post('/vineyard/login', (req, res)=> this.http_login(req, res, req.body))
-//    app.get('/vineyard/login', (req, res)=> this.http_login(req, res, req.query))
     this.listen_user_http('/vineyard/query', (req, res, user)=> {
       console.log('server recieved query request.')
-      return Irrigation.query(req.body, user, this.ground, this.vineyard)
-        .then((objects)=> res.send({ message: 'Success', objects: objects })
-      )
+      return Lawn.Irrigation.query(req.body, user, this.ground, this.vineyard)
+        .then((result)=> {
+          if (!result.status)
+            result.status = 200
+
+          result.message = 'Success'
+          res.send(result)
+        })
     })
+    this.listen_user_http('/vineyard/update', (req, res, user)=> {
+      console.log('server recieved query request.')
+      return Lawn.Irrigation.update(req.body, user, this.ground, this.vineyard)
+        .then((result)=> {
+          if (!result.status)
+            result.status = 200
+
+          result.message = 'Success'
+          res.send(result)
+        })
+    })
+
+    this.listen_user_http('/vineyard/current-user', (req, res, user)=> {
+      res.send({
+        status: 200,
+        user: Lawn.format_public_user(user)
+      })
+      return when.resolve()
+    }, 'get')
 
     this.listen_user_http('/vineyard/upload', (req, res, user)=> {
       console.log('files', req.files)
@@ -552,7 +771,10 @@ class Lawn extends Vineyard.Bulb {
         })
     })
 
+    this.listen_public_http('/vineyard/register', (req, res)=> this.register(req, res))
     this.listen_user_http('/file/:guid.:ext', (req, res, user)=> this.file_download(req, res, user), 'get')
+    this.listen_user_http('/vineyard/facebook/link', (req, res, user)=> this.link_facebook_user(req, res, user), 'post')
+    this.listen_user_http('/vineyard/schema', (req, res, user)=> this.get_schema(req, res, user), 'get')
 
     port = port || this.config.ports.http
     console.log('HTTP listening on port ' + port + '.')
@@ -566,6 +788,10 @@ class Lawn extends Vineyard.Bulb {
     // Socket IO's documentation is a joke.  I had to look on stack overflow for how to close a socket server.
     if (this.io && this.io.server) {
       console.log('Stopping Socket.IO')
+      var clients = this.io.sockets.clients()
+      for (var i in clients) {
+        clients[i].disconnect()
+      }
       this.io.server.close()
       this.io = null
     }
@@ -576,15 +802,31 @@ class Lawn extends Vineyard.Bulb {
     }
 
     if (this.http) {
-      console.log('Closing HTTP connection.')
+      console.log('Closing HTTP.')
       this.http.close()
       this.http = null
       this.app = null
     }
+
+    console.log('Lawn is stopped.')
   }
 }
 
 module Lawn {
+
+  export interface Session_Store_DB {
+    host:string
+    port:number
+    user:string
+    password:string
+    database:string
+  }
+
+  export interface Session_Store_Config {
+    key:string
+    secret:string
+    db: Session_Store_DB
+  }
 
   export interface Config {
     ports
@@ -594,6 +836,7 @@ module Lawn {
     log_file?:string
     admin
     file_path?:string
+    mysql_session_store?:Session_Store_Config
   }
 
   export interface Update_Request {
@@ -628,13 +871,15 @@ module Lawn {
       var action = Irrigation[method]
       return fortress.get_roles(user)
         .then(()=> action(request, user, vineyard.ground, vineyard))
-        .then((objects)=> {
+        .then((result)=> {
+          result.status = 200
+          result.message = 'Success'
           if (callback)
-            callback({ status: 200, 'message': 'Success', objects: objects })
+            callback(result)
           else if (method != 'update')
             socket.emit('error', {
               status: 400,
-              message: 'Requests need to ask for an acknowledgement',
+              message: 'Query requests need to ask for an acknowledgement',
               request: request
             })
         },
@@ -667,6 +912,7 @@ module Lawn {
         })
     }
 
+
     static query(request:Ground.External_Query_Source, user:Vineyard.IUser, ground:Ground.Core, vineyard:Vineyard):Promise {
       if (!request)
         throw new HttpError('Empty request', 400)
@@ -680,7 +926,7 @@ module Lawn {
       return fortress.query_access(user, query)
         .then((result)=> {
           if (result.access)
-            return query.run();
+            return query.run()
           else
             throw new Authorization_Error('You are not authorized to perform this query', result)
         })
@@ -703,6 +949,11 @@ module Lawn {
           if (result.access) {
             var update_promises = updates.map((update) => update.run())
             return when.all(update_promises)
+              .then((objects)=> {
+                return {
+                  objects: objects
+                }
+              })
           }
           else
             throw new Authorization_Error('You are not authorized to perform this update', result)
@@ -739,7 +990,6 @@ module Lawn {
 
     login(req, res, body):Promise {
       console.log('facebook-login', body)
-      var mysql = require('mysql')
 
       return this.get_user(body)
         .then((user)=> {
@@ -753,7 +1003,7 @@ module Lawn {
         .then((facebook_id)=> {
           console.log('fb-user', facebook_id)
           if (!facebook_id) {
-            throw new Lawn.HttpError('Invalid facebook login info.', 400)
+            return when.resolve(new Lawn.HttpError('Invalid facebook login info.', 400))
           }
 
           return this.ground.db.query_single("SELECT id, name FROM users WHERE facebook_id = ?", [facebook_id])
@@ -761,7 +1011,8 @@ module Lawn {
               if (user)
                 return user
 
-              return { status: 300, message: 'That Facebook user id is not yet connect to an account.  Redirect to registration.' }
+              throw new Lawn.HttpError('That Facebook user id is not yet connected to an account.  Redirect to registration.', 300)
+//              return when.reject({ status: 300, message: 'That Facebook user id is not yet connected to an account.  Redirect to registration.' })
 
 //              var options = {
 //                host: 'graph.facebook.com',
@@ -833,7 +1084,7 @@ module Lawn {
       )
     }
 
-    notify(users, name, data, store = true) {
+    notify(users, name, data, trellis_name:string, store = true):Promise {
       // With all the deferred action going on, this is sometimes getting hit
       // after the socket server has just shut down, so check if that is the case.
 
@@ -842,7 +1093,7 @@ module Lawn {
 
       if (!store) {
         if (!this.lawn.io)
-          return
+          return when.resolve()
 
         for (var i = 0; i < users.length; ++i) {
           var id = users[i]
@@ -850,27 +1101,26 @@ module Lawn {
           this.lawn.io.sockets.in('user/' + id).emit(name, data)
         }
       }
-
-      ground.create_update('notification', {
-        event: name,
-        data: JSON.stringify(data)
-      }, this.lawn.config.admin).run()
-        .done((notification)=> {
-          for (var i = 0; i < users.length; ++i) {
-            var id = users[i]
+      data.event = name
+      return ground.create_update(trellis_name, data, this.lawn.config.admin).run()
+        .then((notification)=> {
+          var promises = users.map((id)=> {
             console.log('sending-message', name, id, data)
 
             var online = this.lawn.io && this.lawn.io.sockets.clients(id) ? true : false
 
-            ground.create_update('notification_target', {
-              notification: notification,
+            return ground.create_update('notification_target', {
+              notification: notification.id,
               recipient: id,
               received: online
             }, this.lawn.config.admin).run()
+              .then(()=> {
+                if (this.lawn.io)
+                  this.lawn.io.sockets.in('user/' + id).emit(name, data)
+              })
+          })
 
-            if (this.lawn.io)
-              this.lawn.io.sockets.in('user/' + id).emit(name, data)
-          }
+          return when.all(promises)
         })
     }
 

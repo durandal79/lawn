@@ -1,5 +1,11 @@
 {
   "tables": {
+    "address": {
+      "name": "addresses"
+    },
+    "country": {
+      "name": "countries"
+    },
     "roles_users": {
       "primary_keys": [ "user", "role" ],
       "properties": {
@@ -114,13 +120,22 @@
       }
     },
     "notification": {
-      "parent": "object",
+      "primary_key": "id",
       "properties": {
+        "id": {
+          "type": "int"
+        },
+        "type": {
+          "type": "string",
+          "readonly": true,
+          "insert": "trellis"
+        },
+        "created": {
+          "type": "created",
+          "readonly": true
+        },
         "event": {
           "type": "string"
-        },
-        "data": {
-          "type": "text"
         },
         "targets": {
           "type": "list",
@@ -145,6 +160,9 @@
         "received": {
           "type": "bool",
           "default": false
+        },
+        "viewed": {
+          "type": "datetime"
         }
       }
     },
@@ -279,20 +297,34 @@
     },
     "address": {
       "parent": "resource",
-      "plural": "addresses",
       "properties": {
+        "street1": {
+          "type": "string",
+          "allow_null": true
+        },
+        "street2": {
+          "type": "string",
+          "allow_null": true
+        },
         "country": {
           "type": "reference",
           "trellis": "country",
-          "default": 0
+          "default": 0,
+          "allow_null": true
         },
         "province": {
           "type": "reference",
           "trellis": "province",
-          "default": 0
+          "default": 0,
+          "allow_null": true
         },
         "city": {
-          "type": "string"
+          "type": "string",
+          "allow_null": true
+        },
+        "zip": {
+          "type": "string",
+          "allow_null": true
         }
       }
     },

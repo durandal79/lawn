@@ -14,22 +14,25 @@ declare class Lawn extends Vineyard.Bulb {
     public grow(): void;
     static authorization(handshakeData: any, callback: any): any;
     public debug(...args: any[]): void;
-    public emit_to_users(users: any, name: any, data: any): void;
-    public notify(users: any, name: any, data: any): void;
-    public get_user_socket(id: number): Socket;
+    public emit_to_users(users: any, name: any, data: any): Promise;
+    public notify(users: any, name: any, data: any, trellis_name: string): Promise;
+    public get_user_sockets(id: number): Socket[];
     public initialize_session(socket: any, user: any): void;
     public query_user(user: any, query: Ground.Query_Builder): void;
-    public start(): void;
+    public start(): Promise;
     static public_user_properties: string[];
     static internal_user_properties: string[];
     private static is_ready_user_object(user);
     private static format_public_user(user);
     private static format_internal_user(user);
     public get_public_user(user: any): Promise;
+    public get_schema(req: any, res: any, user: any): void;
     public get_user_from_session(token: string): Promise;
     public http_login(req: any, res: any, body: any): Promise;
     static create_session(user: any, req: any, ground: any): Promise;
     public send_http_login_success(req: any, res: any, user: any): void;
+    public register(req: any, res: any): Promise;
+    public link_facebook_user(req: any, res: any, user: any): Promise;
     static request(options: any, data?: any, secure?: boolean): Promise;
     public login(data: any, socket: ISocket, callback: any): void;
     public on_connection(socket: ISocket): Socket;
@@ -50,6 +53,18 @@ declare class Lawn extends Vineyard.Bulb {
     public stop(): void;
 }
 declare module Lawn {
+    interface Session_Store_DB {
+        host: string;
+        port: number;
+        user: string;
+        password: string;
+        database: string;
+    }
+    interface Session_Store_Config {
+        key: string;
+        secret: string;
+        db: Session_Store_DB;
+    }
     interface Config {
         ports: any;
         log_updates?: boolean;
@@ -58,6 +73,7 @@ declare module Lawn {
         log_file?: string;
         admin: any;
         file_path?: string;
+        mysql_session_store?: Session_Store_Config;
     }
     interface Update_Request {
         objects: any[];
@@ -91,9 +107,9 @@ declare module Lawn {
         public lawn: Lawn;
         public grow(): void;
         public initialize_socket(socket: any, user: any): void;
-        public notify(users: any, name: any, data: any, store?: boolean): void;
+        public notify(users: any, name: any, data: any, trellis_name: string, store?: boolean): Promise;
         public notification_receieved(user: any, request: any): Promise;
         public send_pending_notifications(user: any): void;
     }
 }
-declare module "lawn" { export = Lawn }
+declare module "vineyard-lawn" { export = Lawn }

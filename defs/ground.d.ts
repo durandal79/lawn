@@ -1,6 +1,7 @@
 
 /// <reference path="../metahub/metahub.d.ts" />
 
+declare var when: any;
 declare module Ground {
     class Database {
         public settings: any;
@@ -474,7 +475,5 @@ declare module Ground {
     }
 }
 declare module "ground" {
-  export = Ground
-}declare module "ground" {
   export = Ground
 }

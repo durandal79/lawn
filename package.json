@@ -1,7 +1,7 @@
 {
-  "name": "lawn",
-  "version": "0.1.0",
-  "description": "Vineyard Node.js server",
+  "name": "vineyard-lawn",
+  "version": "0.1.26",
+  "description": "Vineyard Node.js HTTP/Socket.IO server",
   "main": "lawn.js",
   "repository": {
     "type": "git",
@@ -12,11 +12,13 @@
   "dependencies": {
     "express": "3.4.x",
     "socket.io": "0.9.x",
-    "redis": "~0.8.6"
+    "redis": "~0.8.6",
+    "express-mysql-session": "0.0.10"
   },
   "devDependencies": {
     "grunt": "~0.4.x",
     "grunt-ts": "~1.x.x",
-    "grunt-text-replace": "~0.3.11"
+    "grunt-text-replace": "~0.3.11",
+    "grunt-contrib-watch": "~0.6.1"
   }
 }

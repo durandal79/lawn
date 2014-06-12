@@ -1,9 +1,7 @@
 module.exports = function (grunt) {
 
   grunt.loadNpmTasks('grunt-ts')
-//  grunt.loadNpmTasks('grunt-contrib-concat')
-//  grunt.loadNpmTasks('grunt-contrib-watch')
-//  grunt.loadNpmTasks('grunt-contrib-copy')
+  grunt.loadNpmTasks('grunt-contrib-watch')
   grunt.loadNpmTasks('grunt-text-replace')
 
   grunt.initConfig({
@@ -26,14 +24,14 @@ module.exports = function (grunt) {
         replacements: [
           {
             from: 'export = Lawn;',
-            to: 'declare module "lawn" { export = Lawn }'
+            to: 'declare module "vineyard-lawn" { export = Lawn }'
           }
         ]
       }
     },
     watch: {
       lawn: {
-        files: 'lib/**/*.ts',
+        files: 'lawn.ts',
         tasks: ['default']
       }
     }

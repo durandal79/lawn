@@ -10,7 +10,7 @@
 
  =============================================== */
 
-/// <reference path="../../ground/defs/node.d.ts" />
+/// <reference path="../../vineyard-ground/defs/node.d.ts" />
 
 declare module "express" {
     import http = require('http');
